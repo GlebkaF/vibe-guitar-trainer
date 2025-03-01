@@ -294,6 +294,33 @@ class MetronomeWidget(BoxLayout):
         
         self.add_widget(output_device_layout)
         
+        # Размер буфера (для минимизации задержки)
+        buffer_size_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
+        buffer_size_layout.add_widget(Label(text='Размер буфера:', size_hint_x=0.3))
+        
+        self.buffer_size_spinner = Spinner(
+            text='128',
+            values=['64', '128', '256', '512', '1024'],
+            size_hint_x=0.7
+        )
+        self.buffer_size_spinner.bind(text=self.on_buffer_size_selected)
+        buffer_size_layout.add_widget(self.buffer_size_spinner)
+        
+        self.add_widget(buffer_size_layout)
+        
+        # Режим низкой задержки
+        low_latency_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
+        low_latency_layout.add_widget(Label(text='Низкая задержка:', size_hint_x=0.3))
+        
+        self.low_latency_switch = Switch(active=True, size_hint_x=0.2)
+        self.low_latency_switch.bind(active=self.on_low_latency_toggle)
+        low_latency_layout.add_widget(self.low_latency_switch)
+        
+        self.low_latency_label = Label(text='Вкл', size_hint_x=0.5)
+        low_latency_layout.add_widget(self.low_latency_label)
+        
+        self.add_widget(low_latency_layout)
+        
         # Мониторинг звука
         monitoring_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
         monitoring_layout.add_widget(Label(text='Мониторинг:', size_hint_x=0.3))
@@ -367,9 +394,18 @@ class MetronomeWidget(BoxLayout):
         self.click_sound = None
         try:
             # Попробуем использовать встроенный звук
-            sound_file = os.path.join(os.path.dirname(__file__), 'click.wav')
+            sound_file = os.path.join(os.path.dirname(__file__), 'tack.wav')
             if os.path.exists(sound_file):
                 self.click_sound = SoundLoader.load(sound_file)
+                if self.click_sound:
+                    print(f"Загружен звук метронома: {sound_file}")
+                else:
+                    print(f"Не удалось загрузить звук метронома: {sound_file}")
+                    # Попробуем запасной вариант
+                    sound_file = os.path.join(os.path.dirname(__file__), 'click.wav')
+                    if os.path.exists(sound_file):
+                        self.click_sound = SoundLoader.load(sound_file)
+                        print(f"Загружен запасной звук метронома: {sound_file}")
             else:
                 self.status_label.text = 'Звук метронома не найден'
         except Exception as e:
@@ -396,6 +432,7 @@ class MetronomeWidget(BoxLayout):
         # Получаем текущий уровень сигнала от аудио процессора
         if hasattr(self.audio_processor, 'last_rms'):
             level = self.audio_processor.last_rms
+            print(f"Текущий уровень сигнала: {level:.6f}")
             self.signal_indicator.set_level(level)
             self.signal_graph.add_sample(level)
     
@@ -645,6 +682,54 @@ class MetronomeWidget(BoxLayout):
         # Устанавливаем громкость мониторинга
         if hasattr(self.audio_processor, 'set_monitoring_volume'):
             self.audio_processor.set_monitoring_volume(volume)
+    
+    def on_buffer_size_selected(self, instance, text):
+        """Обработчик выбора размера буфера"""
+        try:
+            buffer_size = int(text)
+            was_monitoring = self.audio_processor.is_monitoring
+            
+            # Останавливаем аудиопроцессор
+            self.audio_processor.stop()
+            
+            # Устанавливаем новый размер буфера
+            self.audio_processor.block_size = buffer_size
+            
+            # Перезапускаем аудиопроцессор
+            self.audio_processor.start()
+            
+            # Восстанавливаем мониторинг, если он был включен
+            if was_monitoring:
+                self.audio_processor.start_monitoring()
+            
+            self.status_label.text = f'Установлен размер буфера: {buffer_size} (меньше = меньше задержка, но больше нагрузка)'
+        except Exception as e:
+            self.status_label.text = f'Ошибка установки размера буфера: {str(e)}'
+    
+    def on_low_latency_toggle(self, instance, value):
+        """Обработчик переключения режима низкой задержки"""
+        try:
+            was_monitoring = self.audio_processor.is_monitoring
+            
+            # Останавливаем аудиопроцессор
+            self.audio_processor.stop()
+            
+            # Устанавливаем режим низкой задержки
+            self.audio_processor.use_low_latency = value
+            
+            # Обновляем метку
+            self.low_latency_label.text = 'Вкл' if value else 'Выкл'
+            
+            # Перезапускаем аудиопроцессор
+            self.audio_processor.start()
+            
+            # Восстанавливаем мониторинг, если он был включен
+            if was_monitoring:
+                self.audio_processor.start_monitoring()
+            
+            self.status_label.text = f'Режим низкой задержки: {"включен" if value else "выключен"}'
+        except Exception as e:
+            self.status_label.text = f'Ошибка переключения режима низкой задержки: {str(e)}'
 
 class GuitarTrainerApp(App):
     def build(self):
