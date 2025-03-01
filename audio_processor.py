@@ -28,11 +28,13 @@ class AudioProcessor:
         # Информация о последнем обнаруженном звуке
         self.last_onset_time = 0
         self.min_time_between_onsets = 0.1  # Минимальное время между обнаружениями (сек)
+        self.last_rms = 0.0  # Последнее значение RMS (уровень сигнала)
         
         # Параметры воспроизведения
         self.is_monitoring = False
         self.output_device = None
         self.output_stream = None
+        self.monitoring_volume = 1.0  # Громкость мониторинга (0.0 - 1.0)
         
         # Текущее устройство
         self.current_device_info = None
@@ -60,19 +62,29 @@ class AudioProcessor:
         # Помещаем данные в очередь для обработки в отдельном потоке
         self.audio_queue.put((audio_data, time.time()))
         
-        # Если включен мониторинг, воспроизводим звук
-        if self.is_monitoring and self.output_stream:
+        # Если включен мониторинг, подготавливаем данные для воспроизведения
+        if self.is_monitoring:
             try:
-                # Преобразуем обратно в стерео, если нужно
-                if self.output_stream._channels > 1:
-                    output_data = np.column_stack((audio_data, audio_data))
-                else:
-                    output_data = audio_data
+                # Применяем громкость мониторинга
+                output_data = audio_data * self.monitoring_volume
                 
-                # Воспроизводим звук
+                # Преобразуем в стерео, если нужно
+                if hasattr(self.stream, '_channels') and self.stream._channels > 1:
+                    output_data = np.column_stack((output_data, output_data))
+                
+                # Возвращаем данные для воспроизведения
                 return (output_data.tobytes(), pyaudio.paContinue)
             except Exception as e:
-                print(f"Ошибка воспроизведения звука: {str(e)}")
+                print(f"Ошибка подготовки данных для воспроизведения: {str(e)}")
+        
+        # Если мониторинг выключен или произошла ошибка, возвращаем пустые данные
+        # Проверяем, настроен ли поток на вывод
+        try:
+            if self.stream._output:
+                output_channels = getattr(self.stream, '_channels', 2)
+                return (b'\x00' * frame_count * 4 * output_channels, pyaudio.paContinue)
+        except Exception:
+            pass
         
         return (None, pyaudio.paContinue)
     
@@ -102,6 +114,9 @@ class AudioProcessor:
         """
         # Вычисляем RMS (среднеквадратичное значение) как меру громкости
         rms = np.sqrt(np.mean(np.square(audio_data)))
+        
+        # Всегда сохраняем последнее значение RMS
+        self.last_rms = rms
         
         # Если громкость превышает порог и прошло достаточно времени с последнего обнаружения
         current_time = timestamp
@@ -205,8 +220,10 @@ class AudioProcessor:
     def get_device_channels(self, device_id):
         """Получение количества каналов устройства"""
         try:
-            device_info = self.p.get_device_info_by_index(device_id)
-            return device_info['maxInputChannels']
+            device_info = self.p.get_device_info_by_index(int(device_id))
+            channels = int(device_info['maxInputChannels'])
+            print(f"Устройство {device_info['name']} имеет {channels} входных каналов")
+            return channels
         except Exception as e:
             print(f"Ошибка получения информации об устройстве: {str(e)}")
             return 1
@@ -221,7 +238,7 @@ class AudioProcessor:
         
         # Устанавливаем устройство
         try:
-            self.current_device_info = self.p.get_device_info_by_index(device_id)
+            self.current_device_info = self.p.get_device_info_by_index(int(device_id))
             print(f"Выбрано устройство: {self.current_device_info['name']} с {self.current_device_info['maxInputChannels']} входными каналами")
         except Exception as e:
             print(f"Ошибка получения информации об устройстве: {str(e)}")
@@ -259,6 +276,11 @@ class AudioProcessor:
         if was_monitoring:
             self.start_monitoring()
     
+    def set_monitoring_volume(self, volume):
+        """Установка громкости мониторинга"""
+        self.monitoring_volume = max(0.0, min(1.0, volume))
+        print(f"Громкость мониторинга установлена на {self.monitoring_volume:.2f}")
+    
     def toggle_monitoring(self):
         """Переключение мониторинга звука"""
         if self.is_monitoring:
@@ -271,38 +293,111 @@ class AudioProcessor:
     def start_monitoring(self):
         """Запуск мониторинга звука"""
         if not self.is_running:
+            print("Невозможно запустить мониторинг: обработчик аудио не запущен")
             return False
         
         try:
             # Получаем информацию об устройстве вывода
-            output_device_info = self.p.get_device_info_by_index(self.output_device) if self.output_device is not None else self.p.get_default_output_device_info()
+            output_device_info = None
+            if self.output_device is not None:
+                try:
+                    output_device_info = self.p.get_device_info_by_index(self.output_device)
+                except Exception as e:
+                    print(f"Ошибка получения информации об устройстве вывода: {str(e)}")
+            
+            if output_device_info is None:
+                output_device_info = self.p.get_default_output_device_info()
+                print(f"Используется устройство вывода по умолчанию: {output_device_info['name']}")
+            
+            # Закрываем предыдущий поток, если он существует
+            if hasattr(self, 'output_stream') and self.output_stream:
+                self.output_stream.stop_stream()
+                self.output_stream.close()
+                self.output_stream = None
             
             # Создаем поток вывода
-            self.output_stream = self.p.open(
+            output_channels = min(2, output_device_info.get('maxOutputChannels', 2))
+            
+            # Останавливаем текущий поток ввода
+            was_running = False
+            if self.stream and self.stream.is_active():
+                was_running = True
+                self.stream.stop_stream()
+                self.stream.close()
+                self.stream = None
+            
+            # Создаем новый поток ввода с выводом
+            self.stream = self.p.open(
                 format=pyaudio.paFloat32,
-                channels=2,  # Стерео выход
+                channels=self.channels,
                 rate=self.sample_rate,
+                input=True,
                 output=True,
-                input=False,
+                output_device_index=int(output_device_info['index']),
+                input_device_index=int(self.current_device_info['index']),
                 frames_per_buffer=self.block_size,
-                output_device_index=int(output_device_info['index'])
+                stream_callback=self.audio_callback
             )
             
-            self.output_stream.start_stream()
+            self.stream.start_stream()
             self.is_monitoring = True
-            print(f"Мониторинг звука запущен (устройство: {output_device_info['name']})")
+            print(f"Мониторинг звука запущен (устройство ввода: {self.current_device_info['name']}, устройство вывода: {output_device_info['name']}, громкость: {self.monitoring_volume:.2f})")
             return True
         except Exception as e:
             print(f"Ошибка запуска мониторинга звука: {str(e)}")
+            # Восстанавливаем поток ввода, если он был запущен
+            if was_running:
+                try:
+                    self.stream = self.p.open(
+                        format=pyaudio.paFloat32,
+                        channels=self.channels,
+                        rate=self.sample_rate,
+                        input=True,
+                        output=False,
+                        input_device_index=int(self.current_device_info['index']),
+                        frames_per_buffer=self.block_size,
+                        stream_callback=self.audio_callback
+                    )
+                    self.stream.start_stream()
+                except Exception as e2:
+                    print(f"Ошибка восстановления потока ввода: {str(e2)}")
+            
             self.is_monitoring = False
             return False
     
     def stop_monitoring(self):
         """Остановка мониторинга звука"""
+        if not self.is_monitoring:
+            return False
+        
+        # Останавливаем текущий поток
+        if self.stream and self.stream.is_active():
+            self.stream.stop_stream()
+            self.stream.close()
+            self.stream = None
+        
+        # Закрываем поток вывода, если он существует
         if hasattr(self, 'output_stream') and self.output_stream:
             self.output_stream.stop_stream()
             self.output_stream.close()
             self.output_stream = None
+        
+        # Создаем новый поток только для ввода
+        try:
+            self.stream = self.p.open(
+                format=pyaudio.paFloat32,
+                channels=self.channels,
+                rate=self.sample_rate,
+                input=True,
+                output=False,
+                input_device_index=int(self.current_device_info['index']),
+                frames_per_buffer=self.block_size,
+                stream_callback=self.audio_callback
+            )
+            self.stream.start_stream()
+        except Exception as e:
+            print(f"Ошибка восстановления потока ввода: {str(e)}")
+            self.is_running = False
         
         self.is_monitoring = False
         print("Мониторинг звука остановлен")

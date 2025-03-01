@@ -6,16 +6,136 @@ from kivy.uix.label import Label
 from kivy.uix.slider import Slider
 from kivy.uix.spinner import Spinner
 from kivy.uix.switch import Switch
+from kivy.uix.progressbar import ProgressBar
 from kivy.clock import Clock
 from kivy.core.audio import SoundLoader
-from kivy.graphics import Color, Ellipse, Rectangle
+from kivy.graphics import Color, Ellipse, Rectangle, Line
 from kivy.properties import NumericProperty, ListProperty
 import os
 import time
+import numpy as np
 
 # Импортируем наши модули
 from audio_processor import AudioProcessor
 from rhythm_analyzer import RhythmAnalyzer
+
+class SignalGraph(BoxLayout):
+    """Виджет для отображения графика сигнала"""
+    def __init__(self, **kwargs):
+        super(SignalGraph, self).__init__(**kwargs)
+        self.orientation = 'vertical'
+        self.size_hint_y = None
+        self.height = 150
+        
+        # Заголовок
+        self.add_widget(Label(text='Сигнал с гитары', size_hint_y=None, height=30))
+        
+        # Область для графика
+        self.graph_area = BoxLayout(size_hint_y=None, height=120)
+        self.add_widget(self.graph_area)
+        
+        # Буфер для хранения последних значений сигнала
+        self.buffer_size = 200
+        self.signal_buffer = np.zeros(self.buffer_size)
+        
+        # Обновление графика
+        Clock.schedule_interval(self.update, 1/30)
+    
+    def add_sample(self, value):
+        """Добавление нового значения в буфер"""
+        # Сдвигаем буфер влево и добавляем новое значение в конец
+        self.signal_buffer = np.roll(self.signal_buffer, -1)
+        self.signal_buffer[-1] = value
+    
+    def update(self, dt):
+        """Обновление графика"""
+        self.graph_area.canvas.clear()
+        
+        # Рисуем фон
+        with self.graph_area.canvas:
+            Color(0.1, 0.1, 0.1, 1)
+            Rectangle(pos=self.graph_area.pos, size=self.graph_area.size)
+            
+            # Рисуем горизонтальные линии сетки
+            Color(0.3, 0.3, 0.3, 1)
+            for i in range(1, 4):
+                y = self.graph_area.pos[1] + (i * self.graph_area.height / 4)
+                Line(points=[self.graph_area.pos[0], y, 
+                             self.graph_area.pos[0] + self.graph_area.width, y], 
+                     width=1)
+            
+            # Рисуем порог обнаружения звука
+            Color(1, 0.5, 0, 1)  # Оранжевый
+            threshold_y = self.graph_area.pos[1] + (self.graph_area.height * 0.1)  # 10% от высоты
+            Line(points=[self.graph_area.pos[0], threshold_y, 
+                         self.graph_area.pos[0] + self.graph_area.width, threshold_y], 
+                 width=1, dash_length=5, dash_offset=3)
+            
+            # Рисуем график сигнала
+            Color(0, 1, 0, 1)  # Зеленый
+            points = []
+            
+            for i in range(self.buffer_size):
+                x = self.graph_area.pos[0] + (i * self.graph_area.width / self.buffer_size)
+                # Масштабируем значение сигнала (0-1) на высоту графика
+                y = self.graph_area.pos[1] + (self.signal_buffer[i] * self.graph_area.height)
+                points.extend([x, y])
+            
+            if len(points) >= 4:  # Минимум 2 точки для линии
+                Line(points=points, width=1.5)
+
+class SignalLevelIndicator(BoxLayout):
+    """Виджет для отображения уровня сигнала"""
+    def __init__(self, **kwargs):
+        super(SignalLevelIndicator, self).__init__(**kwargs)
+        self.orientation = 'horizontal'
+        self.size_hint_y = None
+        self.height = 50
+        self.padding = [10, 5]
+        
+        # Метка
+        self.add_widget(Label(text='Уровень:', size_hint_x=0.3))
+        
+        # Индикатор уровня
+        self.level_bar = ProgressBar(max=1.0, value=0, size_hint_x=0.5)
+        self.add_widget(self.level_bar)
+        
+        # Числовое значение
+        self.level_label = Label(text='0.00', size_hint_x=0.2)
+        self.add_widget(self.level_label)
+        
+        # Текущий уровень сигнала
+        self.current_level = 0
+        self.peak_level = 0
+        self.decay_rate = 0.05  # Скорость затухания пикового значения
+        
+        # Обновление индикатора
+        Clock.schedule_interval(self.update, 1/30)
+    
+    def set_level(self, level):
+        """Установка уровня сигнала"""
+        self.current_level = level
+        
+        # Обновляем пиковое значение
+        if level > self.peak_level:
+            self.peak_level = level
+    
+    def update(self, dt):
+        """Обновление индикатора"""
+        # Постепенное затухание пикового значения
+        self.peak_level = max(self.current_level, self.peak_level - self.decay_rate)
+        
+        # Обновляем индикатор и метку
+        self.level_bar.value = self.current_level
+        self.level_label.text = f'{self.current_level:.2f}'
+        
+        # Изменяем цвет в зависимости от уровня
+        if self.current_level > 0.8:
+            self.level_bar.value_normalized = 1.0  # Перегрузка - красный
+        elif self.current_level > 0.5:
+            self.level_bar.value_normalized = 0.7  # Высокий уровень - желтый
+        else:
+            self.level_bar.value_normalized = 0.4  # Нормальный уровень - зеленый
 
 class RhythmVisualizer(BoxLayout):
     """Виджет для визуализации ритма"""
@@ -123,6 +243,14 @@ class MetronomeWidget(BoxLayout):
         self.feedback_indicator = FeedbackIndicator()
         self.add_widget(self.feedback_indicator)
         
+        # График сигнала
+        self.signal_graph = SignalGraph()
+        self.add_widget(self.signal_graph)
+        
+        # Индикатор уровня сигнала
+        self.signal_indicator = SignalLevelIndicator()
+        self.add_widget(self.signal_indicator)
+        
         # Контроль темпа
         tempo_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
         tempo_layout.add_widget(Label(text='Темп (BPM):', size_hint_x=0.3))
@@ -178,6 +306,19 @@ class MetronomeWidget(BoxLayout):
         monitoring_layout.add_widget(self.monitoring_label)
         
         self.add_widget(monitoring_layout)
+        
+        # Громкость мониторинга
+        volume_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
+        volume_layout.add_widget(Label(text='Громкость:', size_hint_x=0.3))
+        
+        self.volume_slider = Slider(min=0.0, max=1.0, value=1.0, size_hint_x=0.5)
+        self.volume_slider.bind(value=self.on_volume_change)
+        volume_layout.add_widget(self.volume_slider)
+        
+        self.volume_label = Label(text='100%', size_hint_x=0.2)
+        volume_layout.add_widget(self.volume_label)
+        
+        self.add_widget(volume_layout)
         
         # Порог громкости
         threshold_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
@@ -243,122 +384,159 @@ class MetronomeWidget(BoxLayout):
         
         # Обновление статистики
         Clock.schedule_interval(self.update_stats, 1.0)
+        
+        # Запускаем обработчик аудио для отображения уровня сигнала
+        self.audio_processor.start()
+        
+        # Запускаем обновление уровня сигнала
+        Clock.schedule_interval(self.update_signal_level, 0.05)
     
-    def update_device_lists(self):
-        """Обновление списков устройств ввода и вывода"""
-        # Обновляем список устройств ввода
+    def update_signal_level(self, dt):
+        """Обновление уровня сигнала"""
+        # Получаем текущий уровень сигнала от аудио процессора
+        if hasattr(self.audio_processor, 'last_rms'):
+            level = self.audio_processor.last_rms
+            self.signal_indicator.set_level(level)
+            self.signal_graph.add_sample(level)
+    
+    def update_device_lists(self, *args):
+        """Обновление списков устройств ввода/вывода"""
         try:
-            input_devices = self.audio_processor.get_input_devices()
-            input_device_names = [f"{i}: {d['name']}" for i, d in enumerate(input_devices)]
+            # Получаем список устройств ввода
+            self.input_devices = self.audio_processor.get_input_devices()
             
-            if input_device_names:
-                self.input_device_spinner.values = input_device_names
-                self.input_device_spinner.text = input_device_names[0]
+            if self.input_devices:
+                # Заполняем выпадающий список устройств ввода
+                device_names = [device['name'] for device in self.input_devices]
+                self.input_device_spinner.values = device_names
                 
                 # Выбираем первое устройство по умолчанию
-                device_id = int(input_device_names[0].split(':')[0])
-                self.audio_processor.set_device(device_id)
-                
-                # Обновляем список каналов для выбранного устройства
-                self.update_channel_list(device_id)
+                if not self.input_device_spinner.text or self.input_device_spinner.text not in device_names:
+                    self.input_device_spinner.text = device_names[0]
+                    # Устанавливаем устройство
+                    self.audio_processor.set_device(self.input_devices[0]['index'])
+                    # Обновляем список каналов
+                    self.update_channel_list()
             else:
                 self.input_device_spinner.values = ['Нет доступных устройств']
                 self.input_device_spinner.text = 'Нет доступных устройств'
         except Exception as e:
             self.status_label.text = f'Ошибка получения списка устройств ввода: {str(e)}'
         
-        # Обновляем список устройств вывода
         try:
-            output_devices = self.audio_processor.get_output_devices()
-            output_device_names = [f"{i}: {d['name']}" for i, d in enumerate(output_devices)]
+            # Получаем список устройств вывода
+            self.output_devices = self.audio_processor.get_output_devices()
             
-            if output_device_names:
-                self.output_device_spinner.values = output_device_names
-                self.output_device_spinner.text = output_device_names[0]
+            if self.output_devices:
+                # Заполняем выпадающий список устройств вывода
+                device_names = [device['name'] for device in self.output_devices]
+                self.output_device_spinner.values = device_names
+                
+                # Выбираем первое устройство по умолчанию
+                if not self.output_device_spinner.text or self.output_device_spinner.text not in device_names:
+                    self.output_device_spinner.text = device_names[0]
+                    # Устанавливаем устройство вывода
+                    self.audio_processor.set_output_device(self.output_devices[0]['index'])
             else:
                 self.output_device_spinner.values = ['Нет доступных устройств']
                 self.output_device_spinner.text = 'Нет доступных устройств'
         except Exception as e:
             self.status_label.text = f'Ошибка получения списка устройств вывода: {str(e)}'
     
-    def update_channel_list(self, device_id):
-        """Обновление списка каналов для выбранного устройства"""
-        try:
-            num_channels = self.audio_processor.get_device_channels(device_id)
-            channel_names = [f"Канал {i+1}" for i in range(num_channels)]
-            
-            if channel_names:
-                self.input_channel_spinner.values = channel_names
-                self.input_channel_spinner.text = channel_names[0]
-            else:
-                self.input_channel_spinner.values = ['Нет доступных каналов']
-                self.input_channel_spinner.text = 'Нет доступных каналов'
-        except Exception as e:
-            self.status_label.text = f'Ошибка получения списка каналов: {str(e)}'
+    def update_channel_list(self, *args):
+        """Обновление списка доступных каналов"""
+        if not hasattr(self, 'input_device_spinner') or not self.input_device_spinner.text:
+            return
+        
+        # Получаем выбранное устройство
+        selected_device = None
+        for device in self.input_devices:
+            if device['name'] == self.input_device_spinner.text:
+                selected_device = device
+                break
+        
+        if not selected_device:
+            return
+        
+        # Получаем количество каналов
+        device_id = selected_device['index']
+        channels = self.audio_processor.get_device_channels(device_id)
+        
+        # Обновляем список каналов
+        channel_values = [str(i) for i in range(channels)]
+        self.input_channel_spinner.values = channel_values
+        
+        # Если текущий выбранный канал больше доступных, сбрасываем на первый
+        if not self.input_channel_spinner.text or int(self.input_channel_spinner.text) >= channels:
+            self.input_channel_spinner.text = "0" if channel_values else ""
+        
+        print(f"Обновлен список каналов для устройства {selected_device['name']}: {channel_values}")
     
     def on_input_device_selected(self, instance, text):
         """Обработчик выбора устройства ввода"""
-        if text.startswith('Нет доступных устройств'):
-            return
-        
         try:
-            device_id = int(text.split(':')[0])
-            self.audio_processor.set_device(device_id)
-            self.status_label.text = f'Выбрано устройство ввода: {text}'
+            # Находим выбранное устройство
+            selected_device = None
+            for device in self.input_devices:
+                if device['name'] == text:
+                    selected_device = device
+                    break
             
-            # Обновляем список каналов для выбранного устройства
-            self.update_channel_list(device_id)
+            if selected_device:
+                # Устанавливаем устройство
+                self.audio_processor.set_device(selected_device['index'])
+                
+                # Обновляем список каналов
+                self.update_channel_list()
+                
+                self.status_label.text = f'Выбрано устройство ввода: {text}'
         except Exception as e:
             self.status_label.text = f'Ошибка выбора устройства ввода: {str(e)}'
     
     def on_input_channel_selected(self, instance, text):
         """Обработчик выбора входного канала"""
-        if text.startswith('Нет доступных каналов'):
-            return
-        
         try:
-            # Извлекаем номер канала из текста (например, "Канал 2" -> 1)
-            channel = int(text.split(' ')[1]) - 1
+            channel = int(text)
             if self.audio_processor.set_input_channel(channel):
-                self.status_label.text = f'Выбран входной канал: {text}'
+                self.status_label.text = f'Выбран входной канал: {channel}'
             else:
-                self.status_label.text = f'Ошибка выбора канала: {text}'
+                self.status_label.text = f'Ошибка выбора канала: канал {channel} недоступен'
         except Exception as e:
             self.status_label.text = f'Ошибка выбора входного канала: {str(e)}'
     
     def on_output_device_selected(self, instance, text):
         """Обработчик выбора устройства вывода"""
-        if text.startswith('Нет доступных устройств'):
-            return
-        
         try:
-            device_id = int(text.split(':')[0])
-            self.audio_processor.set_output_device(device_id)
-            self.status_label.text = f'Выбрано устройство вывода: {text}'
+            # Находим выбранное устройство
+            selected_device = None
+            for device in self.output_devices:
+                if device['name'] == text:
+                    selected_device = device
+                    break
+            
+            if selected_device:
+                # Устанавливаем устройство вывода
+                self.audio_processor.set_output_device(selected_device['index'])
+                self.status_label.text = f'Выбрано устройство вывода: {text}'
         except Exception as e:
             self.status_label.text = f'Ошибка выбора устройства вывода: {str(e)}'
     
     def on_monitoring_toggle(self, instance, value):
-        """Обработчик переключения мониторинга звука"""
-        try:
-            if value:
-                # Включаем мониторинг
-                if self.audio_processor.toggle_monitoring():
-                    self.monitoring_label.text = 'Вкл'
-                    self.status_label.text = 'Мониторинг звука включен'
-                else:
-                    self.monitoring_switch.active = False
-                    self.monitoring_label.text = 'Выкл'
-                    self.status_label.text = 'Ошибка включения мониторинга'
+        """Обработчик переключения мониторинга"""
+        if value:
+            # Включаем мониторинг
+            if self.audio_processor.toggle_monitoring():
+                self.monitoring_label.text = 'Вкл'
+                self.status_label.text = 'Мониторинг включен'
             else:
-                # Выключаем мониторинг
-                self.audio_processor.toggle_monitoring()
+                self.monitoring_switch.active = False
                 self.monitoring_label.text = 'Выкл'
-                self.status_label.text = 'Мониторинг звука выключен'
-        except Exception as e:
-            self.status_label.text = f'Ошибка переключения мониторинга: {str(e)}'
-            self.monitoring_switch.active = False
+                self.status_label.text = 'Ошибка включения мониторинга'
+        else:
+            # Выключаем мониторинг
+            self.audio_processor.toggle_monitoring()
             self.monitoring_label.text = 'Выкл'
+            self.status_label.text = 'Мониторинг выключен'
     
     def on_tempo_change(self, instance, value):
         """Обработчик изменения темпа"""
@@ -458,6 +636,15 @@ class MetronomeWidget(BoxLayout):
         accuracy = stats['accuracy'] * 100
         
         self.stats_label.text = f"Точность: {accuracy:.1f}% ({stats['accurate_hits']}/{stats['total_hits']})"
+    
+    def on_volume_change(self, instance, value):
+        """Обработчик изменения громкости мониторинга"""
+        volume = round(value, 2)
+        self.volume_label.text = f'{int(volume * 100)}%'
+        
+        # Устанавливаем громкость мониторинга
+        if hasattr(self.audio_processor, 'set_monitoring_volume'):
+            self.audio_processor.set_monitoring_volume(volume)
 
 class GuitarTrainerApp(App):
     def build(self):
