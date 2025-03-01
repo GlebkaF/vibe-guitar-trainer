@@ -5,6 +5,7 @@ from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.slider import Slider
 from kivy.uix.spinner import Spinner
+from kivy.uix.switch import Switch
 from kivy.clock import Clock
 from kivy.core.audio import SoundLoader
 from kivy.graphics import Color, Ellipse, Rectangle
@@ -136,14 +137,47 @@ class MetronomeWidget(BoxLayout):
         self.add_widget(tempo_layout)
         
         # Выбор устройства ввода
-        device_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
-        device_layout.add_widget(Label(text='Устройство:', size_hint_x=0.3))
+        input_device_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
+        input_device_layout.add_widget(Label(text='Вход:', size_hint_x=0.3))
         
-        self.device_spinner = Spinner(text='Выберите устройство', size_hint_x=0.7)
-        self.device_spinner.bind(text=self.on_device_selected)
-        device_layout.add_widget(self.device_spinner)
+        self.input_device_spinner = Spinner(text='Выберите устройство', size_hint_x=0.7)
+        self.input_device_spinner.bind(text=self.on_input_device_selected)
+        input_device_layout.add_widget(self.input_device_spinner)
         
-        self.add_widget(device_layout)
+        self.add_widget(input_device_layout)
+        
+        # Выбор канала ввода
+        input_channel_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
+        input_channel_layout.add_widget(Label(text='Канал:', size_hint_x=0.3))
+        
+        self.input_channel_spinner = Spinner(text='Канал 1', size_hint_x=0.7)
+        self.input_channel_spinner.bind(text=self.on_input_channel_selected)
+        input_channel_layout.add_widget(self.input_channel_spinner)
+        
+        self.add_widget(input_channel_layout)
+        
+        # Выбор устройства вывода
+        output_device_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
+        output_device_layout.add_widget(Label(text='Выход:', size_hint_x=0.3))
+        
+        self.output_device_spinner = Spinner(text='Выберите устройство', size_hint_x=0.7)
+        self.output_device_spinner.bind(text=self.on_output_device_selected)
+        output_device_layout.add_widget(self.output_device_spinner)
+        
+        self.add_widget(output_device_layout)
+        
+        # Мониторинг звука
+        monitoring_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
+        monitoring_layout.add_widget(Label(text='Мониторинг:', size_hint_x=0.3))
+        
+        self.monitoring_switch = Switch(active=False, size_hint_x=0.2)
+        self.monitoring_switch.bind(active=self.on_monitoring_toggle)
+        monitoring_layout.add_widget(self.monitoring_switch)
+        
+        self.monitoring_label = Label(text='Выкл', size_hint_x=0.5)
+        monitoring_layout.add_widget(self.monitoring_label)
+        
+        self.add_widget(monitoring_layout)
         
         # Порог громкости
         threshold_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
@@ -205,27 +239,64 @@ class MetronomeWidget(BoxLayout):
         self.rhythm_analyzer = RhythmAnalyzer(tolerance=0.1)
         
         # Обновление списка устройств
-        self.update_device_list()
+        self.update_device_lists()
         
         # Обновление статистики
         Clock.schedule_interval(self.update_stats, 1.0)
     
-    def update_device_list(self):
-        """Обновление списка устройств ввода"""
+    def update_device_lists(self):
+        """Обновление списков устройств ввода и вывода"""
+        # Обновляем список устройств ввода
         try:
-            devices = self.audio_processor.get_input_devices()
-            device_names = [f"{i}: {d['name']}" for i, d in enumerate(devices)]
+            input_devices = self.audio_processor.get_input_devices()
+            input_device_names = [f"{i}: {d['name']}" for i, d in enumerate(input_devices)]
             
-            if device_names:
-                self.device_spinner.values = device_names
-                self.device_spinner.text = device_names[0]
+            if input_device_names:
+                self.input_device_spinner.values = input_device_names
+                self.input_device_spinner.text = input_device_names[0]
+                
+                # Выбираем первое устройство по умолчанию
+                device_id = int(input_device_names[0].split(':')[0])
+                self.audio_processor.set_device(device_id)
+                
+                # Обновляем список каналов для выбранного устройства
+                self.update_channel_list(device_id)
             else:
-                self.device_spinner.values = ['Нет доступных устройств']
-                self.device_spinner.text = 'Нет доступных устройств'
+                self.input_device_spinner.values = ['Нет доступных устройств']
+                self.input_device_spinner.text = 'Нет доступных устройств'
         except Exception as e:
-            self.status_label.text = f'Ошибка получения списка устройств: {str(e)}'
+            self.status_label.text = f'Ошибка получения списка устройств ввода: {str(e)}'
+        
+        # Обновляем список устройств вывода
+        try:
+            output_devices = self.audio_processor.get_output_devices()
+            output_device_names = [f"{i}: {d['name']}" for i, d in enumerate(output_devices)]
+            
+            if output_device_names:
+                self.output_device_spinner.values = output_device_names
+                self.output_device_spinner.text = output_device_names[0]
+            else:
+                self.output_device_spinner.values = ['Нет доступных устройств']
+                self.output_device_spinner.text = 'Нет доступных устройств'
+        except Exception as e:
+            self.status_label.text = f'Ошибка получения списка устройств вывода: {str(e)}'
     
-    def on_device_selected(self, instance, text):
+    def update_channel_list(self, device_id):
+        """Обновление списка каналов для выбранного устройства"""
+        try:
+            num_channels = self.audio_processor.get_device_channels(device_id)
+            channel_names = [f"Канал {i+1}" for i in range(num_channels)]
+            
+            if channel_names:
+                self.input_channel_spinner.values = channel_names
+                self.input_channel_spinner.text = channel_names[0]
+            else:
+                self.input_channel_spinner.values = ['Нет доступных каналов']
+                self.input_channel_spinner.text = 'Нет доступных каналов'
+        except Exception as e:
+            self.status_label.text = f'Ошибка получения списка каналов: {str(e)}'
+    
+    def on_input_device_selected(self, instance, text):
         """Обработчик выбора устройства ввода"""
         if text.startswith('Нет доступных устройств'):
             return
@@ -233,9 +304,61 @@ class MetronomeWidget(BoxLayout):
         try:
             device_id = int(text.split(':')[0])
             self.audio_processor.set_device(device_id)
-            self.status_label.text = f'Выбрано устройство: {text}'
+            self.status_label.text = f'Выбрано устройство ввода: {text}'
+            
+            # Обновляем список каналов для выбранного устройства
+            self.update_channel_list(device_id)
         except Exception as e:
-            self.status_label.text = f'Ошибка выбора устройства: {str(e)}'
+            self.status_label.text = f'Ошибка выбора устройства ввода: {str(e)}'
+    
+    def on_input_channel_selected(self, instance, text):
+        """Обработчик выбора входного канала"""
+        if text.startswith('Нет доступных каналов'):
+            return
+        
+        try:
+            # Извлекаем номер канала из текста (например, "Канал 2" -> 1)
+            channel = int(text.split(' ')[1]) - 1
+            if self.audio_processor.set_input_channel(channel):
+                self.status_label.text = f'Выбран входной канал: {text}'
+            else:
+                self.status_label.text = f'Ошибка выбора канала: {text}'
+        except Exception as e:
+            self.status_label.text = f'Ошибка выбора входного канала: {str(e)}'
+    
+    def on_output_device_selected(self, instance, text):
+        """Обработчик выбора устройства вывода"""
+        if text.startswith('Нет доступных устройств'):
+            return
+        
+        try:
+            device_id = int(text.split(':')[0])
+            self.audio_processor.set_output_device(device_id)
+            self.status_label.text = f'Выбрано устройство вывода: {text}'
+        except Exception as e:
+            self.status_label.text = f'Ошибка выбора устройства вывода: {str(e)}'
+    
+    def on_monitoring_toggle(self, instance, value):
+        """Обработчик переключения мониторинга звука"""
+        try:
+            if value:
+                # Включаем мониторинг
+                if self.audio_processor.toggle_monitoring():
+                    self.monitoring_label.text = 'Вкл'
+                    self.status_label.text = 'Мониторинг звука включен'
+                else:
+                    self.monitoring_switch.active = False
+                    self.monitoring_label.text = 'Выкл'
+                    self.status_label.text = 'Ошибка включения мониторинга'
+            else:
+                # Выключаем мониторинг
+                self.audio_processor.toggle_monitoring()
+                self.monitoring_label.text = 'Выкл'
+                self.status_label.text = 'Мониторинг звука выключен'
+        except Exception as e:
+            self.status_label.text = f'Ошибка переключения мониторинга: {str(e)}'
+            self.monitoring_switch.active = False
+            self.monitoring_label.text = 'Выкл'
     
     def on_tempo_change(self, instance, value):
         """Обработчик изменения темпа"""
