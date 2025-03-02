@@ -11,8 +11,10 @@ from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.relativelayout import RelativeLayout
+from kivy.uix.widget import Widget
 from kivy.clock import Clock
 from kivy.graphics import Color, Rectangle, Line, Ellipse, RoundedRectangle
+from kivy.core.audio import SoundLoader
 import os
 import time
 import numpy as np
@@ -31,7 +33,10 @@ COLORS = {
     'secondary': (0.5, 0.1, 0.5, 1),  # Пурпурный
     'accent': (0.9, 0.1, 0.5, 1),  # Розовый
     'text': (0.9, 0.9, 0.9, 1),  # Белый текст
-    'highlight': (1.0, 0.8, 0.0, 1)  # Желтый для выделения
+    'highlight': (1.0, 0.8, 0.0, 1),  # Желтый для выделения
+    'note': (0.0, 0.8, 1.0, 1),  # Голубой для нот
+    'hit': (0.0, 1.0, 0.0, 1),  # Зеленый для успешных попаданий
+    'miss': (1.0, 0.0, 0.0, 1)   # Красный для промахов
 }
 
 class RockButton(Button):
@@ -505,13 +510,11 @@ class GuitarMonitorWidget(BoxLayout):
             self.start_button.text = 'Стоп'
             self.status_label.text = 'Мониторинг запущен'
     
-    def on_audio_detected(self, timestamp, rms_value):
-        """Обработчик обнаружения звука"""
-        # Обновляем статус
-        self.status_label.text = f'Обнаружен звук: RMS={rms_value:.4f}'
-        
-        # Здесь можно добавить дополнительную обработку звука
-        print(f"Обнаружен звук: RMS={rms_value:.4f}, время={timestamp:.2f}")
+    def on_audio_detected(self, timestamp, amplitude):
+        """Обработчик обнаружения звука с гитары"""
+        # Передаем событие в тренажер ритма через Clock.schedule_once
+        if hasattr(self, 'rhythm_trainer'):
+            Clock.schedule_once(lambda dt: self.rhythm_trainer.on_audio_detected(timestamp, amplitude))
 
 class SettingsPopup(Popup):
     """Всплывающее окно настроек"""
@@ -895,11 +898,506 @@ class SettingsPopup(Popup):
         except Exception as e:
             self.status_label.text = f'Ошибка сохранения настроек: {str(e)}'
 
+class RhythmTrainerWidget(FloatLayout):
+    """Виджет для тренировки ритма в стиле Guitar Hero"""
+    def __init__(self, **kwargs):
+        super(RhythmTrainerWidget, self).__init__(**kwargs)
+        
+        # Загружаем звук для попадания
+        self.hit_sound = SoundLoader.load('metronome.wav')
+        if not self.hit_sound:
+            print("Ошибка: не удалось загрузить звук метронома")
+            # Пробуем загрузить альтернативный звук
+            self.hit_sound = SoundLoader.load('hit.wav')
+            if not self.hit_sound:
+                print("Ошибка: не удалось загрузить альтернативный звук")
+                # Пробуем загрузить еще один альтернативный звук
+                self.hit_sound = SoundLoader.load('click.wav')
+                if not self.hit_sound:
+                    print("Ошибка: не удалось загрузить звуки")
+        
+        # Загружаем звук метронома для генерации нот
+        self.metronome_sound = SoundLoader.load('tack.wav')
+        if not self.metronome_sound:
+            print("Ошибка: не удалось загрузить звук такта")
+            # Пробуем загрузить альтернативный звук
+            self.metronome_sound = SoundLoader.load('click.wav')
+            if not self.metronome_sound:
+                print("Ошибка: не удалось загрузить альтернативный звук для метронома")
+        
+        # Флаги для включения/выключения звуков
+        self.hit_sound_enabled = True
+        self.metronome_sound_enabled = True
+        
+        # Параметры тренировки
+        self.bpm = 60  # Темп (ударов в минуту)
+        self.note_speed = 300  # Скорость падения нот (пикселей в секунду)
+        self.is_running = False  # Флаг запуска тренировки
+        self.notes = []  # Список нот
+        self.hit_line_height = 100  # Высота горизонтальной линии от низа
+        self.line_flash_duration = 0.2  # Длительность подсветки линии в секундах
+        self.is_line_flashing = False  # Флаг мигания линии
+        
+        # Обновляем canvas при изменении размера
+        self.bind(size=self._update_canvas, pos=self._update_canvas)
+        
+        # Инициализируем canvas
+        with self.canvas:
+            # Фон
+            self.bg_color = Color(*COLORS['dark'])
+            self.bg_rect = Rectangle(pos=self.pos, size=self.size)
+            
+            # Вертикальная линия для падения нот
+            self.track_color = Color(*COLORS['primary'])
+            self.track_line = Line(
+                points=[self.width / 2, 0, self.width / 2, self.height],
+                width=5
+            )
+            
+            # Добавляем дополнительные эффекты для линии
+            self.track_glow_color = Color(*COLORS['accent'], 0.5)
+            self.track_glow = Line(
+                points=[self.width / 2, 0, self.width / 2, self.height],
+                width=10
+            )
+            
+            # Горизонтальная линия для обозначения места удара
+            self.hit_line_color = Color(*COLORS['highlight'])
+            self.hit_line = Line(
+                points=[self.pos[0], self.pos[1] + self.hit_line_height, 
+                        self.pos[0] + self.width, self.pos[1] + self.hit_line_height],
+                width=3
+            )
+            
+            # Эффект свечения для горизонтальной линии
+            self.hit_line_glow_color = Color(*COLORS['highlight'], 0.3)
+            self.hit_line_glow = Line(
+                points=[self.pos[0], self.pos[1] + self.hit_line_height, 
+                        self.pos[0] + self.width, self.pos[1] + self.hit_line_height],
+                width=8
+            )
+    
+    def _update_canvas(self, instance, value):
+        """Обновление canvas при изменении размера"""
+        # Обновляем фон
+        self.bg_rect.pos = self.pos
+        self.bg_rect.size = self.size
+        
+        # Обновляем вертикальную линию
+        self.track_line.points = [self.width / 2 + self.pos[0], self.pos[1], 
+                                 self.width / 2 + self.pos[0], self.pos[1] + self.height]
+        self.track_glow.points = [self.width / 2 + self.pos[0], self.pos[1], 
+                                 self.width / 2 + self.pos[0], self.pos[1] + self.height]
+        
+        # Обновляем горизонтальную линию
+        self.hit_line.points = [self.pos[0], self.pos[1] + self.hit_line_height, 
+                               self.pos[0] + self.width, self.pos[1] + self.hit_line_height]
+        self.hit_line_glow.points = [self.pos[0], self.pos[1] + self.hit_line_height, 
+                                    self.pos[0] + self.width, self.pos[1] + self.hit_line_height]
+    
+    def flash_line(self):
+        """Подсветка вертикальной линии зеленым цветом"""
+        if self.is_line_flashing:
+            return
+            
+        self.is_line_flashing = True
+        
+        # Используем Clock.schedule_once для выполнения в главном потоке
+        Clock.schedule_once(self._do_flash_line)
+    
+    def _do_flash_line(self, dt):
+        """Выполнение подсветки линии в главном потоке"""
+        # Меняем цвет линии на яркий зеленый
+        self.track_color.rgb = (0.0, 1.0, 0.0)  # Яркий зеленый
+        self.track_glow_color.rgba = (0.0, 1.0, 0.0, 0.8)  # Яркий зеленый с высокой прозрачностью
+        
+        # Увеличиваем ширину линии для эффекта
+        self.track_line.width = 8
+        self.track_glow.width = 15
+        
+        # Планируем возврат к исходному цвету
+        Clock.schedule_once(self.reset_line_color, self.line_flash_duration)
+    
+    def reset_line_color(self, dt):
+        """Возврат цвета линии к исходному"""
+        self.track_color.rgb = COLORS['primary'][:3]
+        self.track_glow_color.rgba = (*COLORS['accent'][:3], 0.5)
+        self.track_line.width = 5
+        self.track_glow.width = 10
+        self.is_line_flashing = False
+    
+    def toggle_training(self):
+        """Переключение тренировки"""
+        if self.is_running:
+            self.stop_training()
+        else:
+            self.start_training()
+    
+    def start_training(self):
+        """Запуск тренировки"""
+        self.is_running = True
+        self.notes = []
+        
+        # Запускаем обновление
+        Clock.schedule_interval(self.update, 1/60)
+        
+        # Запускаем генерацию нот
+        # Создаем первую ноту сразу
+        self.generate_note(0)
+        
+        # Планируем следующую ноту
+        self.schedule_next_note()
+    
+    def stop_training(self):
+        """Остановка тренировки"""
+        self.is_running = False
+        
+        # Останавливаем обновление
+        Clock.unschedule(self.update)
+        Clock.unschedule(self.generate_note)
+    
+    def update(self, dt):
+        """Обновление состояния тренировки"""
+        if not self.is_running:
+            return
+        
+        # Обновляем позиции нот
+        notes_to_remove = []
+        for note in self.notes:
+            # Перемещаем ноту вниз
+            note['y'] -= self.note_speed * dt
+            
+            # Удаляем ноты, которые вышли за пределы экрана
+            if note['y'] < -50:
+                notes_to_remove.append(note)
+        
+        # Удаляем ноты
+        for note in notes_to_remove:
+            self.notes.remove(note)
+        
+        # Перерисовываем
+        self.draw_notes()
+    
+    def draw_notes(self):
+        """Отрисовка нот"""
+        # Очищаем предыдущие ноты
+        try:
+            self.canvas.remove_group('notes')
+        except:
+            pass  # Игнорируем ошибки, если группа не существует
+        
+        # Рисуем ноты
+        with self.canvas:
+            for note in self.notes:
+                Color(*COLORS['note'], group='notes')
+                
+                # Рисуем ноту (круг) по центру вертикальной линии
+                # Учитываем позицию виджета
+                center_x = self.pos[0] + self.width / 2
+                Ellipse(
+                    pos=(center_x - 20, self.pos[1] + note['y'] - 20),
+                    size=(40, 40),
+                    group='notes'
+                )
+    
+    def generate_note(self, dt):
+        """Генерация новой ноты"""
+        if not self.is_running:
+            return
+        
+        # Воспроизводим звук метронома при генерации ноты
+        if self.metronome_sound_enabled and hasattr(self, 'metronome_sound') and self.metronome_sound:
+            self.metronome_sound.play()
+        
+        # Создаем новую ноту
+        note = {'y': self.height}  # Начальная позиция у верхней границы
+        self.notes.append(note)
+        
+        # Перерисовываем ноты
+        self.draw_notes()
+        
+        # Планируем следующую ноту
+        self.schedule_next_note()
+    
+    def schedule_next_note(self):
+        """Планирование следующей ноты"""
+        # Вычисляем интервал между нотами (в секундах)
+        interval = 60.0 / self.bpm
+        
+        # Планируем генерацию следующей ноты
+        Clock.schedule_once(self.generate_note, interval)
+    
+    def on_audio_detected(self, timestamp, amplitude):
+        """Обработчик обнаружения звука с гитары"""
+        if not self.is_running:
+            return
+        
+        # Используем Clock.schedule_once для выполнения в главном потоке
+        Clock.schedule_once(lambda dt: self._process_audio_hit(timestamp, amplitude))
+    
+    def _process_audio_hit(self, timestamp, amplitude):
+        """Обработка обнаружения звука в главном потоке"""
+        # Подсвечиваем вертикальную линию
+        self.flash_line()
+            
+        # Проверяем, есть ли ноты рядом с линией удара
+        hit_zone_top = self.hit_line_height + 20
+        hit_zone_bottom = self.hit_line_height - 20
+        
+        for note in list(self.notes):
+            # Если нота находится в зоне удара
+            if hit_zone_bottom <= note['y'] <= hit_zone_top:
+                # Отмечаем ноту как "попадание"
+                note['hit'] = True
+                
+                # Воспроизводим звук попадания
+                if self.hit_sound_enabled and hasattr(self, 'hit_sound') and self.hit_sound:
+                    self.hit_sound.play()
+                
+                # Выводим сообщение о попадании
+                print(f"Попадание! Время: {timestamp:.2f}")
+                
+                # Удаляем ноту из списка
+                self.notes.remove(note)
+                
+                # Перерисовываем ноты
+                self.draw_notes()
+                break
+
+class ControlPanel(BoxLayout):
+    """Панель управления тренажером"""
+    def __init__(self, rhythm_trainer, app_instance, **kwargs):
+        super(ControlPanel, self).__init__(**kwargs)
+        self.orientation = 'vertical'
+        self.spacing = 10
+        self.padding = 10
+        
+        self.rhythm_trainer = rhythm_trainer
+        self.app = app_instance
+        
+        # Заголовок
+        self.add_widget(Label(
+            text='УПРАВЛЕНИЕ',
+            font_size='18sp',
+            bold=True,
+            color=COLORS['primary'],
+            size_hint_y=None,
+            height=40
+        ))
+        
+        # Кнопка старт/стоп
+        self.start_button = RockButton(
+            text='СТАРТ',
+            size_hint_y=None,
+            height=60
+        )
+        self.start_button.bind(on_press=self.toggle_training)
+        self.add_widget(self.start_button)
+        
+        # Настройка BPM
+        bpm_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=40)
+        bpm_layout.add_widget(Label(
+            text='BPM:',
+            size_hint_x=0.3,
+            color=COLORS['text']
+        ))
+        
+        self.bpm_slider = RockSlider(
+            min=30,
+            max=180,
+            value=60,
+            size_hint_x=0.7
+        )
+        self.bpm_slider.bind(value=self.on_bpm_change)
+        bpm_layout.add_widget(self.bpm_slider)
+        
+        self.add_widget(bpm_layout)
+        
+        # Отображение текущего BPM
+        self.bpm_label = Label(
+            text='60 BPM',
+            size_hint_y=None,
+            height=30,
+            color=COLORS['text']
+        )
+        self.add_widget(self.bpm_label)
+        
+        # Настройка скорости нот
+        speed_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=40)
+        speed_layout.add_widget(Label(
+            text='Скорость:',
+            size_hint_x=0.3,
+            color=COLORS['text']
+        ))
+        
+        self.speed_slider = RockSlider(
+            min=100,
+            max=500,
+            value=300,
+            size_hint_x=0.7
+        )
+        self.speed_slider.bind(value=self.on_speed_change)
+        speed_layout.add_widget(self.speed_slider)
+        
+        self.add_widget(speed_layout)
+        
+        # Отображение текущей скорости
+        self.speed_label = Label(
+            text='300 пикс/сек',
+            size_hint_y=None,
+            height=30,
+            color=COLORS['text']
+        )
+        self.add_widget(self.speed_label)
+        
+        # Настройка громкости звуков
+        sound_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=40)
+        sound_layout.add_widget(Label(
+            text='Громкость:',
+            size_hint_x=0.3,
+            color=COLORS['text']
+        ))
+        
+        self.sound_slider = RockSlider(
+            min=0,
+            max=1,
+            value=1,
+            size_hint_x=0.7
+        )
+        self.sound_slider.bind(value=self.on_sound_volume_change)
+        sound_layout.add_widget(self.sound_slider)
+        
+        self.add_widget(sound_layout)
+        
+        # Отображение текущей громкости
+        self.sound_label = Label(
+            text='100%',
+            size_hint_y=None,
+            height=30,
+            color=COLORS['text']
+        )
+        self.add_widget(self.sound_label)
+        
+        # Переключатели для звуков
+        # Звук метронома
+        metronome_sound_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=40)
+        metronome_sound_layout.add_widget(Label(
+            text='Звук метронома:',
+            size_hint_x=0.7,
+            color=COLORS['text']
+        ))
+        
+        self.metronome_sound_switch = Switch(
+            active=True,
+            size_hint_x=0.3
+        )
+        self.metronome_sound_switch.bind(active=self.on_metronome_sound_toggle)
+        metronome_sound_layout.add_widget(self.metronome_sound_switch)
+        
+        self.add_widget(metronome_sound_layout)
+        
+        # Звук попадания
+        hit_sound_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=40)
+        hit_sound_layout.add_widget(Label(
+            text='Звук попадания:',
+            size_hint_x=0.7,
+            color=COLORS['text']
+        ))
+        
+        self.hit_sound_switch = Switch(
+            active=True,
+            size_hint_x=0.3
+        )
+        self.hit_sound_switch.bind(active=self.on_hit_sound_toggle)
+        hit_sound_layout.add_widget(self.hit_sound_switch)
+        
+        self.add_widget(hit_sound_layout)
+        
+        # Добавляем пустое пространство (растягивающийся виджет)
+        self.add_widget(Widget())
+        
+        # Кнопка настроек
+        settings_btn = RockButton(
+            text='НАСТРОЙКИ',
+            size_hint_y=None,
+            height=50,
+            font_size='16sp',
+            bold=True
+        )
+        settings_btn.bind(on_press=self.app.show_settings)
+        self.add_widget(settings_btn)
+        
+        # Кнопка мониторинга
+        self.monitoring_btn = RockButton(
+            text='МОНИТОРИНГ ВЫКЛ',
+            size_hint_y=None,
+            height=50,
+            font_size='16sp',
+            bold=True
+        )
+        self.monitoring_btn.bind(on_press=self.toggle_monitoring)
+        self.add_widget(self.monitoring_btn)
+    
+    def toggle_training(self, instance):
+        """Переключение тренировки"""
+        if self.rhythm_trainer.is_running:
+            self.rhythm_trainer.stop_training()
+            self.start_button.text = 'СТАРТ'
+        else:
+            self.rhythm_trainer.start_training()
+            self.start_button.text = 'СТОП'
+    
+    def on_bpm_change(self, instance, value):
+        """Изменение BPM"""
+        bpm = int(value)
+        self.rhythm_trainer.bpm = bpm
+        self.bpm_label.text = f'{bpm} BPM'
+    
+    def on_speed_change(self, instance, value):
+        """Изменение скорости нот"""
+        speed = int(value)
+        self.rhythm_trainer.note_speed = speed
+        self.speed_label.text = f'{speed} пикс/сек'
+    
+    def toggle_monitoring(self, instance):
+        """Переключение мониторинга"""
+        if self.app.audio_processor.is_monitoring:
+            # Выключаем мониторинг
+            self.app.audio_processor.toggle_monitoring()
+            self.monitoring_btn.text = 'МОНИТОРИНГ ВЫКЛ'
+        else:
+            # Включаем мониторинг
+            if self.app.audio_processor.toggle_monitoring():
+                self.monitoring_btn.text = 'МОНИТОРИНГ ВКЛ'
+            else:
+                # Если не удалось включить мониторинг
+                self.monitoring_btn.text = 'ОШИБКА МОНИТОРИНГА'
+    
+    def on_sound_volume_change(self, instance, value):
+        """Обработчик изменения громкости звуков"""
+        volume = int(value * 100)
+        self.sound_label.text = f'{volume}%'
+        
+        # Устанавливаем громкость для звуков
+        if hasattr(self.rhythm_trainer, 'hit_sound') and self.rhythm_trainer.hit_sound:
+            self.rhythm_trainer.hit_sound.volume = value
+        
+        if hasattr(self.rhythm_trainer, 'metronome_sound') and self.rhythm_trainer.metronome_sound:
+            self.rhythm_trainer.metronome_sound.volume = value
+    
+    def on_metronome_sound_toggle(self, instance, value):
+        """Обработчик переключения звука метронома"""
+        self.rhythm_trainer.metronome_sound_enabled = value
+    
+    def on_hit_sound_toggle(self, instance, value):
+        """Обработчик переключения звука попадания"""
+        self.rhythm_trainer.hit_sound_enabled = value
+
 class GuitarTrainerApp(App):
     """Приложение для тренировки ритма на гитаре в рок-стиле"""
     def build(self):
         # Устанавливаем заголовок окна
-        self.title = 'ROCK GUITAR RHYTHM TRAINER'
+        self.title = 'VIBE HERO 3'
         
         # Загружаем настройки
         self.settings = self.load_settings()
@@ -939,7 +1437,7 @@ class GuitarTrainerApp(App):
         
         # Заголовок
         title_label = Label(
-            text='ROCK GUITAR RHYTHM TRAINER',
+            text='VIBE HERO 3',
             font_size='28sp',
             bold=True,
             color=COLORS['primary'],
@@ -949,42 +1447,37 @@ class GuitarTrainerApp(App):
         
         root.add_widget(header)
         
-        # Основной контент - только индикатор уровня сигнала
-        content = BoxLayout(orientation='vertical', spacing=10)
-        
         # Индикатор уровня сигнала
         self.signal_indicator = SignalLevelIndicator()
-        content.add_widget(self.signal_indicator)
+        root.add_widget(self.signal_indicator)
         
-        # Добавляем скроллинг для контента
-        scroll_view = ScrollView(do_scroll_x=False)
-        scroll_view.add_widget(content)
-        root.add_widget(scroll_view)
+        # Основной контент - двухколоночный макет
+        main_content = BoxLayout(orientation='horizontal', spacing=10)
         
-        # Нижняя панель с кнопками
-        bottom_panel = BoxLayout(orientation='horizontal', size_hint_y=None, height=60, spacing=10)
+        # Левая колонка - панель управления
+        left_column = BoxLayout(orientation='vertical', size_hint_x=0.3)
+        with left_column.canvas.before:
+            Color(*COLORS['background'])
+            self.left_bg = Rectangle(pos=left_column.pos, size=left_column.size)
+        left_column.bind(pos=self._update_left_bg, size=self._update_left_bg)
         
-        # Кнопка настроек
-        settings_btn = RockButton(
-            text='НАСТРОЙКИ',
-            size_hint_x=0.5,
-            font_size='16sp',
-            bold=True
-        )
-        settings_btn.bind(on_press=self.show_settings)
-        bottom_panel.add_widget(settings_btn)
+        # Тренажер ритма (создаем сначала, чтобы передать в панель управления)
+        self.rhythm_trainer = RhythmTrainerWidget()
         
-        # Кнопка мониторинга
-        self.monitoring_btn = RockButton(
-            text='МОНИТОРИНГ ВЫКЛ',
-            size_hint_x=0.5,
-            font_size='16sp',
-            bold=True
-        )
-        self.monitoring_btn.bind(on_press=self.toggle_monitoring)
-        bottom_panel.add_widget(self.monitoring_btn)
+        # Панель управления
+        self.control_panel = ControlPanel(self.rhythm_trainer, self)
+        left_column.add_widget(self.control_panel)
         
-        root.add_widget(bottom_panel)
+        # Правая колонка - тренажер ритма
+        right_column = BoxLayout(orientation='vertical', size_hint_x=0.7)
+        right_column.add_widget(self.rhythm_trainer)
+        
+        # Добавляем колонки в основной контент
+        main_content.add_widget(left_column)
+        main_content.add_widget(right_column)
+        
+        # Добавляем основной контент в корневой виджет
+        root.add_widget(main_content)
         
         # Инициализация аудио процессора
         self.audio_processor = AudioProcessor(callback=self.on_audio_detected)
@@ -1006,6 +1499,12 @@ class GuitarTrainerApp(App):
             self.bg_rect.pos = instance.pos
             self.bg_rect.size = instance.size
     
+    def _update_left_bg(self, instance, value):
+        """Обновление фона левой колонки"""
+        if hasattr(self, 'left_bg'):
+            self.left_bg.pos = instance.pos
+            self.left_bg.size = instance.size
+    
     def update_signal_level(self, dt):
         """Обновление уровня сигнала"""
         # Получаем текущий уровень сигнала от аудио процессора
@@ -1015,7 +1514,9 @@ class GuitarTrainerApp(App):
     
     def on_audio_detected(self, timestamp, amplitude):
         """Обработчик обнаружения звука с гитары"""
-        pass
+        # Передаем событие в тренажер ритма через Clock.schedule_once
+        if hasattr(self, 'rhythm_trainer'):
+            Clock.schedule_once(lambda dt: self.rhythm_trainer.on_audio_detected(timestamp, amplitude))
     
     def show_settings(self, instance):
         """Показать настройки"""

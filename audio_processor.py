@@ -78,12 +78,12 @@ class AudioProcessor:
         current_time = time.time()
         if rms > self.threshold and (current_time - self.last_onset_time) > self.min_time_between_onsets:
             self.last_onset_time = current_time
-            # Вызываем callback, если он задан
+            # Вместо прямого вызова callback, добавляем событие в очередь
             if self.callback:
-                self.callback(current_time, rms)
+                self.audio_queue.put(("onset", current_time, rms))
         
         # Помещаем данные в очередь для обработки в отдельном потоке
-        self.audio_queue.put((audio_data, current_time))
+        self.audio_queue.put(("audio_data", audio_data, current_time))
         
         # Если включен мониторинг, подготавливаем данные для воспроизведения
         if self.is_monitoring:
@@ -122,15 +122,30 @@ class AudioProcessor:
         while self.is_running:
             try:
                 # Получаем данные из очереди с таймаутом
-                audio_data, timestamp = self.audio_queue.get(timeout=0.1)
+                event = self.audio_queue.get(timeout=0.1)
                 
-                # Обработка уже перенесена в callback для снижения задержки
+                # Обрабатываем разные типы событий
+                if event[0] == "onset" and self.callback:
+                    # Событие обнаружения звука
+                    timestamp, rms = event[1], event[2]
+                    try:
+                        self.callback(timestamp, rms)
+                    except Exception as e:
+                        print(f"Ошибка в callback: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
+                elif event[0] == "audio_data":
+                    # Обычные аудио данные
+                    audio_data, timestamp = event[1], event[2]
+                    # Здесь можно выполнить дополнительную обработку аудио
                 
                 self.audio_queue.task_done()
             except queue.Empty:
                 pass
             except Exception as e:
                 print(f"Ошибка обработки аудио: {str(e)}")
+                import traceback
+                traceback.print_exc()
     
     def detect_onset(self, audio_data, timestamp):
         """
