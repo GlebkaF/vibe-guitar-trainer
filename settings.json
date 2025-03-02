@@ -1,0 +1,9 @@
+{
+    "input_device": "Scarlett Solo USB",
+    "input_device_index": 1,
+    "output_device": "\u0414\u0438\u043d\u0430\u043c\u0438\u043a\u0438 MacBook Pro",
+    "output_device_index": 3,
+    "input_channel": 1,
+    "buffer_size": 64,
+    "low_latency": true
+}

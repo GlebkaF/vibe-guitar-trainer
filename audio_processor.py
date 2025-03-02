@@ -34,7 +34,7 @@ class AudioProcessor:
         self.is_monitoring = False
         self.output_device = None
         self.output_stream = None
-        self.monitoring_volume = 1.0  # Громкость мониторинга (0.0 - 1.0)
+        self.monitoring_volume = 1.0  # Громкость мониторинга всегда 100%
         
         # Текущее устройство
         self.current_device_info = None
@@ -88,8 +88,8 @@ class AudioProcessor:
         # Если включен мониторинг, подготавливаем данные для воспроизведения
         if self.is_monitoring:
             try:
-                # Применяем громкость мониторинга
-                output_data = audio_data * self.monitoring_volume
+                # Применяем громкость мониторинга (всегда 100%)
+                output_data = audio_data
                 
                 # Определяем количество каналов для вывода
                 output_channels = 2  # По умолчанию стерео
@@ -177,6 +177,17 @@ class AudioProcessor:
             
             # Определяем количество каналов
             self.channels = int(self.current_device_info.get('maxInputChannels', 1))
+            
+            # Проверяем, что устройство имеет хотя бы один канал
+            if self.channels <= 0:
+                print(f"Ошибка: устройство {self.current_device_info['name']} не имеет входных каналов")
+                self.is_running = False
+                return
+            
+            # Проверяем, что выбранный канал существует
+            if self.input_channel >= self.channels:
+                print(f"Предупреждение: канал {self.input_channel} не существует, используем канал 0")
+                self.input_channel = 0
             
             # Базовые параметры для потока
             stream_params = {
@@ -359,6 +370,12 @@ class AudioProcessor:
                 output_device_info = self.p.get_default_output_device_info()
                 print(f"Используется устройство вывода по умолчанию: {output_device_info['name']}")
             
+            # Проверяем, что устройство вывода имеет хотя бы один канал
+            output_channels = int(output_device_info.get('maxOutputChannels', 2))
+            if output_channels <= 0:
+                print(f"Ошибка: устройство {output_device_info['name']} не имеет выходных каналов")
+                return False
+            
             # Закрываем предыдущий поток, если он существует
             if hasattr(self, 'stream') and self.stream:
                 self.stream.stop_stream()
@@ -381,10 +398,6 @@ class AudioProcessor:
                 'stream_callback': self.audio_callback,
                 'start': False
             }
-            
-            # Добавляем настройки низкой задержки, если включены
-            # PyAudio не поддерживает параметры input_latency и output_latency
-            # Для низкой задержки используем только маленький размер буфера
             
             # Создаем новый поток ввода с выводом
             self.stream = self.p.open(**stream_params)
